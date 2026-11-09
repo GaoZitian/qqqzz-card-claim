@@ -1,0 +1,12 @@
+{
+  "name": "qqqzz-card-claim",
+  "version": "1.0.0",
+  "description": "qqqzz.cc 免费名片赞自动领取（快刷名片赞100个，免费商品）",
+  "main": "claim.js",
+  "scripts": {
+    "start": "node claim.js"
+  },
+  "dependencies": {
+    "playwright-core": "^1.65.0"
+  }
+}
