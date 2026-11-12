@@ -35,18 +35,163 @@ const SITE = 'https://qqqzz.cc';
 const GOODS_ID = 83;
 
 const DRY_RUN = process.argv.includes('--dry-run');
-// 保护参数（环境变量可覆盖）：
+
+// ============================================================
+// 统一配置
+//
+//   方式 A（推荐）：GitHub Secret 只配一个 CONFIG，内容为 JSON：
+//     CONFIG='{"QQ_NUMBER":"123456789|987654321","BATCH_SIZE":"3","QQ_PAUSE":"10",
+//              "BATCH_PAUSE":"45","FAIL_STOP":"2","TELEGRAM_BOT_TOKEN":"",
+//              "TELEGRAM_CHAT_ID":"","WXPUSH_URL":"","WXPUSH_TOKEN":"",
+//              "WXPUSH_USERID":"","WXPUSH_TEMPLATE_ID":"","WXPUSH_BASE_URL":""}'
+//
+//   方式 B（本地调试方便）：不配 CONFIG，改为逐个设置同名环境变量
+//
+//   注意：CONFIG 存在时，方式 B 的同名环境变量会被**完全忽略**（不会合并覆盖）。
+// ============================================================
+const CONFIG_DEFAULTS = {
+    QQ_NUMBER: '',
+    BATCH_SIZE: '3',
+    QQ_PAUSE: '10',
+    BATCH_PAUSE: '45',
+    FAIL_STOP: '2',
+    TELEGRAM_BOT_TOKEN: '',
+    TELEGRAM_CHAT_ID: '',
+    WXPUSH_URL: '',
+    WXPUSH_TOKEN: '',
+    WXPUSH_USERID: '',
+    WXPUSH_TEMPLATE_ID: '',
+    WXPUSH_BASE_URL: '',
+};
+
+/** 读取统一配置：CONFIG 优先，缺失则回落逐个环境变量 */
+function loadConfig() {
+    const raw = (process.env.CONFIG || '').trim();
+    if (!raw) {
+        // 方式 B：逐个环境变量（本地调试）
+        const cfg = { ...CONFIG_DEFAULTS };
+        for (const key of Object.keys(CONFIG_DEFAULTS)) {
+            const v = process.env[key];
+            if (v !== undefined && v !== '') cfg[key] = String(v).trim();
+        }
+        return cfg;
+    }
+    // 方式 A：CONFIG JSON（唯一配置源）
+    let parsed;
+    try {
+        parsed = JSON.parse(raw);
+    } catch (e) {
+        console.error('\n❌ CONFIG 格式不正确，请检查 Secret 配置。');
+        console.error('   要求：严格 JSON，双引号包裹字段和值，逗号不能多也不能少。');
+        console.error('   解析错误：' + e.message);
+        process.exit(1);
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        console.error('\n❌ CONFIG 必须是 JSON 对象（不能是数组或字符串）');
+        process.exit(1);
+    }
+    const cfg = { ...CONFIG_DEFAULTS };
+    for (const [k, v] of Object.entries(parsed)) {
+        if (v === null || v === undefined) continue;
+        cfg[k] = String(v).trim();
+    }
+    // 冲突提醒：CONFIG 存在时，同名环境变量会被完全忽略（不合并），提醒用户避免误配
+    const ignored = [];
+    for (const key of Object.keys(CONFIG_DEFAULTS)) {
+        const envVal = (process.env[key] || '').trim();
+        if (!envVal) continue;
+        ignored.push(`${key}（环境变量=${envVal} → 实际生效=${cfg[key] || '默认值'}）`);
+    }
+    if (ignored.length > 0) {
+        console.log('\n⚠️ 检测到 CONFIG 与环境变量同时配置，环境变量已被忽略（CONFIG 优先，不会合并）：');
+        for (const item of ignored) console.log(`   - ${item}`);
+        console.log('   建议只保留一种配置方式。');
+    }
+    return cfg;
+}
+
+const CONFIG = loadConfig();
+
+// 保护参数（可由 CONFIG 覆盖）：
 //   BATCH_SIZE   每批领取的 QQ 数，默认 3（主动分批降低风控）
 //   QQ_PAUSE     批次内 QQ 之间休息秒数，默认 10
 //   BATCH_PAUSE  批次间休息秒数，默认 45
 //   FAIL_STOP    连续失败 N 个即中止（防风控升级）
-const BATCH_SIZE = parseInt(process.env.BATCH_SIZE || '3', 10) || 3;
-const QQ_PAUSE = parseInt(process.env.QQ_PAUSE || '10', 10) || 10;
-const BATCH_PAUSE = parseInt(process.env.BATCH_PAUSE || '45', 10) || 45;
-const FAIL_STOP = parseInt(process.env.FAIL_STOP || '2', 10) || 2;
+const BATCH_SIZE = parseInt(CONFIG.BATCH_SIZE, 10) || 3;
+const QQ_PAUSE = parseInt(CONFIG.QQ_PAUSE, 10) || 10;
+const BATCH_PAUSE = parseInt(CONFIG.BATCH_PAUSE, 10) || 45;
+const FAIL_STOP = parseInt(CONFIG.FAIL_STOP, 10) || 2;
 
 const log = (...a) => console.log(...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ============================================================
+// 通知配置（全部可选；未配置则只打印预览）
+//   TELEGRAM_BOT_TOKEN  Telegram bot token
+//   TELEGRAM_CHAT_ID    Telegram 目标 chat id
+//   WXPUSH_URL          wxpush Worker 基础地址（不含 /wxsend，代码自动拼接）
+//                       项目：https://github.com/frankiejun/wxpush
+//   WXPUSH_TOKEN        wxpush 部署时设置的 API_TOKEN
+//   WXPUSH_USERID       可选，覆盖默认接收用户（多个 OpenID 用半角 | 分隔）
+//   WXPUSH_TEMPLATE_ID  可选，覆盖默认模板 ID
+//   WXPUSH_BASE_URL     可选，覆盖点击消息后的跳转地址
+// ============================================================
+const TG_BOT_TOKEN = CONFIG.TELEGRAM_BOT_TOKEN;
+const TG_CHAT_ID = CONFIG.TELEGRAM_CHAT_ID;
+const WXPUSH_URL = CONFIG.WXPUSH_URL.replace(/\/+$/, '');
+const WXPUSH_TOKEN = CONFIG.WXPUSH_TOKEN;
+const WXPUSH_USERID = CONFIG.WXPUSH_USERID;
+const WXPUSH_TEMPLATE_ID = CONFIG.WXPUSH_TEMPLATE_ID;
+const WXPUSH_BASE_URL = CONFIG.WXPUSH_BASE_URL;
+
+/** Telegram 推送 */
+async function tgSend(title, text) {
+    if (!TG_BOT_TOKEN || !TG_CHAT_ID) {
+        log(`\n📣 推送预览（未配置 Telegram）\n【${title}】\n${text}\n`);
+        return;
+    }
+    try {
+        const r = await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chat_id: TG_CHAT_ID,
+                text: `【${title}】\n${text}`,
+                disable_web_page_preview: true,
+            }),
+        });
+        const j = await r.json().catch(() => ({}));
+        log('Telegram 推送:', j.ok ? '成功' : `失败 ${JSON.stringify(j).slice(0, 200)}`);
+    } catch (e) {
+        log('Telegram 推送异常:', e.message);
+    }
+}
+
+/** wxpush 微信推送（与 Telegram 独立，可同时启用） */
+async function wxpushSend(title, text) {
+    if (!WXPUSH_URL || !WXPUSH_TOKEN) {
+        log(`\n📣 推送预览（未配置 wxpush）\n【${title}】\n${text}\n`);
+        return;
+    }
+    try {
+        const params = new URLSearchParams({ token: WXPUSH_TOKEN, title, content: text });
+        if (WXPUSH_USERID) params.set('userid', WXPUSH_USERID);
+        if (WXPUSH_TEMPLATE_ID) params.set('template_id', WXPUSH_TEMPLATE_ID);
+        if (WXPUSH_BASE_URL) params.set('base_url', WXPUSH_BASE_URL);
+        const r = await fetch(`${WXPUSH_URL}/wxsend?${params.toString()}`, { method: 'GET' });
+        const body = await r.text().catch(() => '');
+        const ok = r.status === 200 && body.includes('Successfully sent');
+        log('wxpush 推送:', ok ? '成功' : `失败 HTTP ${r.status} ${body.slice(0, 200)}`);
+    } catch (e) {
+        log('wxpush 推送异常:', e.message);
+    }
+}
+
+/** 统一通知入口：Telegram + wxpush 双通道（各自独立，未配置则只打印预览） */
+async function notify(title, text) {
+    await tgSend(title, text);
+    await wxpushSend(title, text);
+}
 
 /** 脱敏 QQ：只显示前 4 位，其余用 * 代替（不泄露完整号码） */
 function maskQQ(q) {
@@ -96,9 +241,9 @@ function findChrome() {
 
 async function main() {
     // QQ_NUMBER 支持多号：QQ1|QQ2|QQ3（竖线分隔），每个 QQ 独立走完整流程
-    const raw = (process.env.QQ_NUMBER || '').trim();
+    const raw = (CONFIG.QQ_NUMBER || '').trim();
     if (!raw) {
-        console.error('❌ 缺少环境变量 QQ_NUMBER');
+        console.error('❌ 缺少配置项 QQ_NUMBER（请在 CONFIG JSON 里填，或设置同名环境变量）');
         process.exit(1);
     }
     const qqs = raw.split('|').map((s) => s.trim()).filter(Boolean);
@@ -289,7 +434,7 @@ async function main() {
                 qqCode = 1;
                 log(`\n❌ 领取失败  QQ=${qqMask}  ${addMsg || JSON.stringify(api.add) || '未捕获到结果'}`);
             }
-            results.push({ qq, code: qqCode });
+            results.push({ qq, code: qqCode, msg: addMsg || '' });
             // 关闭本 QQ 的 page，避免多号时资源堆积
             await page.close().catch(() => {});
 
@@ -350,9 +495,29 @@ async function main() {
         } else {
             code = 1;
         }
+
+        // 推送通知（Telegram + wxpush）
+        {
+            const title = code === 0
+                ? '✅ 名片赞领取完成'
+                : (code === 1 ? '⚠️ 名片赞领取部分失败' : `🛑 名片赞领取中止（code=${code}）`);
+            const lines = [];
+            for (const r of results) {
+                const mark = r.code === 0 ? '✅' : (r.code === 1 ? '❌' : (r.code === 2 ? '🔒' : '🔐'));
+                const suffix = r.code === 0 ? '成功/已领过' : (r.msg || `code=${r.code}`);
+                lines.push(`${mark} ${maskQQ(r.qq)}  ${suffix}`);
+            }
+            if (unprocessed > 0) lines.push(`⏭️ 未处理 ${unprocessed} 个 QQ`);
+            const text = lines.join('\n');
+            log('\n📤 推送通知...');
+            await notify(title, text);
+        }
     } catch (e) {
         code = 10;
         console.error('\n❌ 流程异常:', e.message);
+        try {
+            await notify('🛑 名片赞领取异常', `流程异常：${e.message}`);
+        } catch (_) { /* 推送失败不影响退出码 */ }
     } finally {
         await browser.close();
     }

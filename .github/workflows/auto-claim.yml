@@ -13,13 +13,27 @@ jobs:
 
       - name: 安装 Playwright
         run: |
-          npm install playwright-core
-          npx playwright install chromium
+          npm install
+          node node_modules/playwright-core/cli.js install chromium
 
       - name: 运行领取脚本
         id: claim
         env:
+          # 推荐：统一配置（JSON）
+          CONFIG: ${{ secrets.CONFIG }}
+          # 兼容：不配 CONFIG 时可用这些逐个变量（CONFIG 存在时会被忽略）
           QQ_NUMBER: ${{ secrets.QQ_NUMBER }}
+          BATCH_SIZE: ${{ secrets.BATCH_SIZE }}
+          QQ_PAUSE: ${{ secrets.QQ_PAUSE }}
+          BATCH_PAUSE: ${{ secrets.BATCH_PAUSE }}
+          FAIL_STOP: ${{ secrets.FAIL_STOP }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WXPUSH_URL: ${{ secrets.WXPUSH_URL }}
+          WXPUSH_TOKEN: ${{ secrets.WXPUSH_TOKEN }}
+          WXPUSH_USERID: ${{ secrets.WXPUSH_USERID }}
+          WXPUSH_TEMPLATE_ID: ${{ secrets.WXPUSH_TEMPLATE_ID }}
+          WXPUSH_BASE_URL: ${{ secrets.WXPUSH_BASE_URL }}
         run: |
           node claim.js
 
