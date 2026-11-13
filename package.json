@@ -4,7 +4,9 @@
   "description": "qqqzz.cc 免费名片赞自动领取（快刷名片赞100个，免费商品）",
   "main": "claim.js",
   "scripts": {
-    "start": "node claim.js"
+    "start": "node claim.js",
+    "setup": "npm install && npx playwright-core install chromium",
+    "dry-run": "node claim.js --dry-run"
   },
   "dependencies": {
     "playwright-core": "^1.65.0"

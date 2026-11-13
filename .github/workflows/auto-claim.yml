@@ -1,4 +1,4 @@
-name: 免费名片赞自动领取
+name: 免费名片赞自动领取（多号，独立IP）
 
 on:
   schedule:
@@ -7,6 +7,13 @@ on:
 
 jobs:
   claim:
+    strategy:
+      # 严格串行：1 个 IP 领完，下一个 job 再领（每个 job = 独立虚拟机 = 独立出口 IP）
+      max-parallel: 1
+      matrix:
+        # 序号从仓库变量 QQ_IDX 动态读（明文，只放纯数字序号；QQ 号在 Secrets 里，不暴露）
+        # 加号/减号只改 Settings→Variables 里的 QQ_IDX，不用动本文件
+        idx: ${{ fromJSON(vars.QQ_IDX) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -19,10 +26,12 @@ jobs:
       - name: 运行领取脚本
         id: claim
         env:
-          # 推荐：统一配置（JSON）
+          # 矩阵模式：每个 job 只读自己那个序号对应的 QQ 号（每个号一个 Secret）
+          QQ_NUMBER: ${{ secrets[format('QQ_NUMBER_{0}', matrix.idx)] }}
+          GH_MATRIX_IDX: ${{ matrix.idx }}
+          # 推荐：统一配置（JSON，不含 QQ_NUMBER）
           CONFIG: ${{ secrets.CONFIG }}
           # 兼容：不配 CONFIG 时可用这些逐个变量（CONFIG 存在时会被忽略）
-          QQ_NUMBER: ${{ secrets.QQ_NUMBER }}
           BATCH_SIZE: ${{ secrets.BATCH_SIZE }}
           QQ_PAUSE: ${{ secrets.QQ_PAUSE }}
           BATCH_PAUSE: ${{ secrets.BATCH_PAUSE }}
@@ -40,5 +49,5 @@ jobs:
       - name: 检查结果
         if: always()
         run: |
-          echo "=== 结果汇总 ==="
+          echo "=== 结果汇总（矩阵序号 ${{ matrix.idx }}）==="
           echo "退出码: ${{ job.status }}"

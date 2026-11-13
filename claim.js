@@ -13,12 +13,17 @@
  *      -> POST /api/PreviewPrice   {"is_free":true,"final_price":0}
  *      -> POST /api/add             {"code":200,"msg":"订单创建成功"}
  *
- * 用法（QQ_NUMBER 支持多号，用半角竖线 | 分隔；自动按 BATCH_SIZE 分批，批次间休息 BATCH_PAUSE 秒）:
+ * 用法（QQ_NUMBER 一律从环境变量读取，不走 CONFIG；多号用半角竖线 | 分隔；自动按 BATCH_SIZE 分批）:
  *   QQ_NUMBER=123456789 node claim.js              真实领取（单号）
  *   QQ_NUMBER=123456789|987654321 node claim.js    真实领取（多号，每个独立走流程）
  *   QQ_NUMBER=123456789 node claim.js --dry-run     演练到提交前, 不产生订单
+ *   node claim.js                                   未设 QQ_NUMBER → 打印「跳过」并 exit 0（矩阵序号超配属正常）
  *
- * 退出码: 0 全部成功/已领过  1 有失败  2 需登录(中止)  3 需验证码(中止)
+ * GitHub Actions 矩阵模式: workflow 按 vars.QQ_IDX 展开多个 job（max-parallel:1 串行），
+ *   每个 job 注入 QQ_NUMBER=secrets.QQ_NUMBER_{matrix.idx}（独立虚拟机 = 独立出口 IP，避开「名额不足」限流），
+ *   并传 GH_MATRIX_IDX=<序号> 用于日志标识。
+ *
+ * 退出码: 0 全部成功/已领过/未配置 QQ_NUMBER(跳过)  1 有失败或配置错  2 需登录(中止)  3 需验证码(中止)
  *          4 连续失败中止  10 异常
  */
 
@@ -39,8 +44,12 @@ const DRY_RUN = process.argv.includes('--dry-run');
 // ============================================================
 // 统一配置
 //
-//   方式 A（推荐）：GitHub Secret 只配一个 CONFIG，内容为 JSON：
-//     CONFIG='{"QQ_NUMBER":"123456789|987654321","BATCH_SIZE":"3","QQ_PAUSE":"10",
+//   QQ_NUMBER 不走 CONFIG：一律从环境变量读取
+//     - 本地: export QQ_NUMBER=123456789
+//     - GitHub Actions: workflow 注入 secrets.QQ_NUMBER_{matrix.idx}（每个号一个 Secret）
+//
+//   方式 A（推荐）：GitHub Secret 只配一个 CONFIG，内容为 JSON（不含 QQ_NUMBER）：
+//     CONFIG='{"BATCH_SIZE":"3","QQ_PAUSE":"10",
 //              "BATCH_PAUSE":"45","FAIL_STOP":"2","TELEGRAM_BOT_TOKEN":"",
 //              "TELEGRAM_CHAT_ID":"","WXPUSH_URL":"","WXPUSH_TOKEN":"",
 //              "WXPUSH_USERID":"","WXPUSH_TEMPLATE_ID":"","WXPUSH_BASE_URL":""}'
@@ -50,7 +59,6 @@ const DRY_RUN = process.argv.includes('--dry-run');
 //   注意：CONFIG 存在时，方式 B 的同名环境变量会被**完全忽略**（不会合并覆盖）。
 // ============================================================
 const CONFIG_DEFAULTS = {
-    QQ_NUMBER: '',
     BATCH_SIZE: '3',
     QQ_PAUSE: '10',
     BATCH_PAUSE: '45',
@@ -90,6 +98,11 @@ function loadConfig() {
         console.error('\n❌ CONFIG 必须是 JSON 对象（不能是数组或字符串）');
         process.exit(1);
     }
+    // 迁移提醒：QQ_NUMBER 已移出 CONFIG（改从环境变量 / Secret QQ_NUMBER_N 读取）
+    if (parsed.QQ_NUMBER !== undefined) {
+        console.log('\n⚠️ CONFIG 里的 QQ_NUMBER 已不再读取（QQ 号改从环境变量注入，CONFIG 不含 QQ_NUMBER）。');
+        console.log('   GitHub Actions 请把每个号配成 Secret QQ_NUMBER_1、QQ_NUMBER_2…；本地请 export QQ_NUMBER=...');
+    }
     const cfg = { ...CONFIG_DEFAULTS };
     for (const [k, v] of Object.entries(parsed)) {
         if (v === null || v === undefined) continue;
@@ -113,6 +126,9 @@ function loadConfig() {
 const CONFIG = loadConfig();
 
 // 保护参数（可由 CONFIG 覆盖）：
+//   注意：这 4 项只在「一次运行多个 QQ」时生效（本地 QQ_NUMBER 用 | 分隔多号）。
+//         GitHub 矩阵模式每个 job 只跑 1 个号 → 分批/批内休息/批间休息/连续失败计数都用不到。
+//         例外：FAIL_STOP=1 时单号失败也会立即中止（退出码 4）。
 //   BATCH_SIZE   每批领取的 QQ 数，默认 3（主动分批降低风控）
 //   QQ_PAUSE     批次内 QQ 之间休息秒数，默认 10
 //   BATCH_PAUSE  批次间休息秒数，默认 45
@@ -240,11 +256,17 @@ function findChrome() {
 }
 
 async function main() {
-    // QQ_NUMBER 支持多号：QQ1|QQ2|QQ3（竖线分隔），每个 QQ 独立走完整流程
-    const raw = (CONFIG.QQ_NUMBER || '').trim();
+    // QQ_NUMBER 一律从环境变量读取（不走 CONFIG）：本地 export；Actions 由 workflow 按 matrix 序号注入。
+    // 多号：QQ1|QQ2|QQ3（竖线分隔），每个 QQ 独立走完整流程（仅本地多号场景；矩阵模式每个 job 只有一个号）
+    const raw = (process.env.QQ_NUMBER || '').trim();
     if (!raw) {
-        console.error('❌ 缺少配置项 QQ_NUMBER（请在 CONFIG JSON 里填，或设置同名环境变量）');
-        process.exit(1);
+        const idx = (process.env.GH_MATRIX_IDX || '').trim();
+        if (idx) {
+            console.log(`⏭️ QQ_NUMBER_${idx} 未配置（矩阵序号 ${idx} 没有对应的 Secret），跳过该号`);
+        } else {
+            console.log('⏭️ 未配置 QQ_NUMBER，跳过（本地调试请 export QQ_NUMBER=...）');
+        }
+        process.exit(0);
     }
     const qqs = raw.split('|').map((s) => s.trim()).filter(Boolean);
     if (qqs.length === 0) {
@@ -421,6 +443,11 @@ async function main() {
             } else if (addMsg.includes('已') && (addMsg.includes('领取') || addMsg.includes('下单') || addMsg.includes('购买'))) {
                 qqCode = 0;
                 log(`\n⚠️ 今日已领过  QQ=${qqMask}  ${addMsg}`);
+            } else if (addMsg.includes('名额不足')) {
+                // 站点会话/IP 短窗口领取额度限流（非风控、非每日一次）；矩阵模式下后续 job 会用新 IP
+                qqCode = 1;
+                log(`\n⚠️ 额度限制  QQ=${qqMask}  ${addMsg}`);
+                log('   （站点会话/IP 短窗口领取额度已用尽，非风控；矩阵模式下后续 job 会用新 IP）');
             } else if (addMsg.includes('登录') || (api.add && api.add.code === 4)) {
                 qqCode = 2;
                 log(`\n🔒 需要登录  QQ=${qqMask}  ${addMsg || 'code=4'}`);
@@ -451,6 +478,8 @@ async function main() {
             // 防线 4: 连续失败 → 中止（防风控升级）
             if (qqCode === 0) {
                 consecFail = 0;
+            } else if (addMsg.includes('名额不足')) {
+                // 额度限制（非风控）不计入连续失败，避免同一 IP 连续限流被误判为风控中止
             } else {
                 consecFail += 1;
                 if (consecFail >= FAIL_STOP) {
