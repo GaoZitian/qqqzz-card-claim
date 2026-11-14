@@ -1,11 +1,16 @@
-name: 免费名片赞自动领取（多号，独立IP）
+name: 免费名片赞自动领取（多号，独立IP，汇总单条推送）
 
 on:
   schedule:
-    - cron: '5 16 * * *'  # UTC 16:05 = 北京时间 00:05
+    - cron: '30 16 * * *'  # UTC 16:30 = 北京时间 00:30
   workflow_dispatch:
 
 jobs:
+  # ============================================================
+  # 领取 job（矩阵）：每个 QQ 一个独立虚拟机 = 独立出口 IP
+  #   - 只负责领取，不推送消息（PUSH_MODE=none）
+  #   - 结果写成 result-<序号>.json，上传为 artifact
+  # ============================================================
   claim:
     strategy:
       # 严格串行：1 个 IP 领完，下一个 job 再领（每个 job = 独立虚拟机 = 独立出口 IP）
@@ -28,14 +33,14 @@ jobs:
         env:
           # 矩阵模式：每个 job 只读自己那个序号对应的 QQ 号（每个号一个 Secret）
           QQ_NUMBER: ${{ secrets[format('QQ_NUMBER_{0}', matrix.idx)] }}
-          GH_MATRIX_IDX: ${{ matrix.idx }}
+          # 结果文件序号（writeResultFile 用它命名 result-<序号>.json）
+          QQ_IDX: ${{ matrix.idx }}
+          RESULT_DIR: ${{ github.workspace }}/results
+          # worker 不推送，由汇总 job 统一推一条
+          PUSH_MODE: 'none'
           # 推荐：统一配置（JSON，不含 QQ_NUMBER）
           CONFIG: ${{ secrets.CONFIG }}
           # 兼容：不配 CONFIG 时可用这些逐个变量（CONFIG 存在时会被忽略）
-          BATCH_SIZE: ${{ secrets.BATCH_SIZE }}
-          QQ_PAUSE: ${{ secrets.QQ_PAUSE }}
-          BATCH_PAUSE: ${{ secrets.BATCH_PAUSE }}
-          FAIL_STOP: ${{ secrets.FAIL_STOP }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           WXPUSH_URL: ${{ secrets.WXPUSH_URL }}
@@ -46,8 +51,54 @@ jobs:
         run: |
           node claim.js
 
+      - name: 上传领取结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claim-result-${{ matrix.idx }}
+          path: ${{ github.workspace }}/results/result-${{ matrix.idx }}.json
+          if-no-files-found: warn
+          retention-days: 1
+
       - name: 检查结果
         if: always()
         run: |
           echo "=== 结果汇总（矩阵序号 ${{ matrix.idx }}）==="
           echo "退出码: ${{ job.status }}"
+
+  # ============================================================
+  # 汇总 job：下载所有 matrix 结果 → 合并成【一条】消息推送
+  #   - needs: claim + if: always() → 即使某个 QQ 领取失败，也照样汇总推送
+  #   - 退出码：只有「汇总本身出错 / 消息没发出去」才算失败（红）；
+  #             某个 QQ 没领到只体现在消息内容里，不让 run 变红
+  # ============================================================
+  aggregate:
+    needs: claim
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: 下载所有领取结果
+        uses: actions/download-artifact@v4
+        with:
+          pattern: claim-result-*
+          path: results
+          merge-multiple: true
+
+      - name: 合并结果并推送一条消息
+        env:
+          RESULT_DIR: ${{ github.workspace }}/results
+          # 预期序号列表（用于发现「应该有结果却没结果」的序号）
+          QQ_IDX_LIST: ${{ vars.QQ_IDX }}
+          # 通知配置（与领取脚本同一套规则）
+          CONFIG: ${{ secrets.CONFIG }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WXPUSH_URL: ${{ secrets.WXPUSH_URL }}
+          WXPUSH_TOKEN: ${{ secrets.WXPUSH_TOKEN }}
+          WXPUSH_USERID: ${{ secrets.WXPUSH_USERID }}
+          WXPUSH_TEMPLATE_ID: ${{ secrets.WXPUSH_TEMPLATE_ID }}
+          WXPUSH_BASE_URL: ${{ secrets.WXPUSH_BASE_URL }}
+        run: |
+          node aggregate.js
