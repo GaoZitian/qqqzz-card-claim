@@ -75,9 +75,11 @@ async function main() {
 
     const { results, aborted, missingDir } = loadResults();
     if (missingDir) {
-        console.error(`❌ 结果目录不存在：${RESULT_DIR}`);
-        console.error('   请确认领取 job 是否上传了 artifact（upload-artifact / download-artifact）。');
-        process.exit(1);
+        // 目录不存在 = 所有领取 job 都没产出结果（artifact 为空或上传失败）。
+        // 这属于「领取失败」，不是「汇总出错」——汇总 job 不该因此变红，
+        // 否则真正的故障信号（消息没发出去）会被淹没。改成走「全部缺失」汇总路径。
+        console.log(`⚠️ 结果目录不存在：${RESULT_DIR}（所有领取 job 均未产出结果）`);
+        console.log('   请查看各 claim job 的日志确认失败原因（通常是站点不可达）。');
     }
 
     // 已有结果涉及的序号
@@ -91,8 +93,12 @@ async function main() {
     }
 
     if (results.length === 0) {
-        console.error('❌ 没有任何领取结果，无法汇总');
-        process.exit(1);
+        // 连预期序号列表都没有 → 无法确定该汇总哪些号，属于汇总本身配置问题
+        if (missing.length === 0) {
+            console.error('❌ 没有任何领取结果，且无法确定预期序号（QQ_IDX_LIST 为空或格式错）');
+            console.error('   请确认仓库变量 QQ_IDX 已配置，以及领取 job 是否上传了 artifact。');
+            process.exit(1);
+        }
     }
 
     // 按序号排序，序号小的在前；无序号的排在最后
