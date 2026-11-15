@@ -15,6 +15,9 @@ jobs:
     strategy:
       # 严格串行：1 个 IP 领完，下一个 job 再领（每个 job = 独立虚拟机 = 独立出口 IP）
       max-parallel: 1
+      # 关掉 fail-fast（GitHub 默认为 true）：某个号失败/额度限制时不取消其余 job，
+      # 否则第一个号一出问题，后面所有号连尝试的机会都没有，汇总消息也不完整。
+      fail-fast: false
       matrix:
         # 序号从仓库变量 QQ_IDX 动态读（明文，只放纯数字序号；QQ 号在 Secrets 里，不暴露）
         # 加号/减号只改 Settings→Variables 里的 QQ_IDX，不用动本文件
