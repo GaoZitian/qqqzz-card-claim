@@ -3,3 +3,6 @@ node_modules/
 *.log
 __pycache__/
 .env
+
+# 本地运行产生的结果目录
+results/

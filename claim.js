@@ -254,6 +254,13 @@ async function main() {
                 const url = resp.url();
                 try {
                     if (url.includes('/api/PreviewPrice')) {
+                        // 只接收「带 QQ 号」的预览响应。页面加载时站点会自动发一条
+                        // 空表单预览（body={"0":"","pt":83}），它的响应可能延迟 10-20 秒才到，
+                        // 会在填号后反向覆盖掉正确的带号响应，被误读成「QQ号码不能为空！」。
+                        // 判据：本次填入的 QQ 号出现在该请求的 body 里。
+                        const req = resp.request();
+                        const body = (req.postData() || '').replace(/\s+/g, '');
+                        if (!body.includes(qq)) return;   // 空表单 / 其它号的预览，不参与判断
                         api.preview = await resp.json();
                     } else if (url.includes('/api/add')) {
                         api.addStatus = resp.status();
@@ -302,15 +309,23 @@ async function main() {
             await qqInput.fill(qq);
             await sleep(800);
 
-            // 触发一次价格预览, 确认商品仍免费
+            // 触发一次价格预览, 确认商品仍免费。
+            // 站点 PreviewPrice 响应实测要 10-20 秒才返回（带防抖延迟），
+            // 之前只等 1.5 秒就往下走，导致带号预览还没回来就点了领取。
             await qqInput.blur().catch(() => {});
-            await sleep(1500);
-            if (api.preview) {
+            let previewGot = false;
+            for (let i = 0; i < 40; i++) {   // 最多等 40 秒
+                await sleep(1000);
+                if (api.preview) { previewGot = true; break; }
+            }
+            if (previewGot) {
                 log('   PreviewPrice:', JSON.stringify(api.preview.data || api.preview));
                 const d = api.preview.data || {};
                 if (d.is_free === false) {
                     throw new Error(`该商品已非免费 (final_price=${d.final_price}), 中止`);
                 }
+            } else {
+                log('   ⚠️ 预览响应超时（站点响应偏慢），继续尝试领取');
             }
 
             // --- 4. 点免费领取 ---
@@ -321,10 +336,16 @@ async function main() {
             await claimBtn.click({ force: true });
 
             // --- 5. 等结果 ---
+            // 站点 /api/add 响应实测可达 10-20 秒（与 PreviewPrice 同量级的延迟），
+            // 之前只等 30 秒且不区分「超时」与「真失败」，会把慢响应误报成「领取失败 null」。
             log('步骤 5: 等待服务器响应...');
-            for (let i = 0; i < 30; i++) {
+            let addGot = false;
+            for (let i = 0; i < 60; i++) {   // 最多等 60 秒
                 await sleep(1000);
-                if (api.add) break;
+                if (api.add) { addGot = true; break; }
+            }
+            if (!addGot) {
+                log(`   ⚠️ 等待 ${60} 秒仍未收到 /api/add 响应（站点响应超时）`);
             }
 
             let pageText = '';
@@ -341,10 +362,13 @@ async function main() {
             //   - /api/add 阶段：「名额不足」
             // 两个阶段都要查，否则会被误判成「领取失败」。
             const addMsg = api.add && api.add.msg ? String(api.add.msg) : '';
+            // api.preview 现在只可能是「带号」的预览响应（上游已按请求体过滤掉空表单那条），
+            // 所以这里的 previewMsg 是可信的额度信号。
             const previewMsg = api.preview && api.preview.msg ? String(api.preview.msg) : '';
             const isQuota = addMsg.includes('名额不足') || previewMsg.includes('名额不足');
             let qqCode = 1;
             let qqStatus = 'failed';
+            let resultMsgPending = '';   // 需要写进结果文件的原因（超时等特殊情况）
             if (isQuota) {
                 // 额度限制：站点会话/IP 短窗口额度已用尽（非风控、非每日一次）。
                 // 优先于「成功」判定：PreviewPrice 阶段报名额不足时，后续 /api/add 不会真正下单，
@@ -376,10 +400,20 @@ async function main() {
                 qqCode = 0;
                 qqStatus = 'success';
                 log(`\n✅ 订单创建成功  QQ=${qqMask}  (页面确认)`);
+            } else if (!api.add) {
+                // 没收到 /api/add 响应 —— 是「响应超时」，不是「领取被拒」。
+                // 服务端可能已经下单成功，只是响应没回来，误报成单纯失败会误导，
+                // 所以用 failed 但 msg 说清「未收到响应 + 可能已下单」。
+                qqCode = 1;
+                qqStatus = 'failed';
+                const timeoutMsg = `未收到下单响应（等待 ${60}s，站点响应超时；服务端可能已实际下单，请核对后重试）`;
+                log(`\n❌ 未收到下单响应  QQ=${qqMask}`);
+                log('   （等待 ' + 60 + ' 秒仍无 /api/add 响应；服务端可能已实际下单，请到站点核对，避免重复领取）');
+                resultMsgPending = timeoutMsg;
             } else {
                 qqCode = 1;
                 qqStatus = 'failed';
-                log(`\n❌ 领取失败  QQ=${qqMask}  ${addMsg || JSON.stringify(api.add) || '未捕获到结果'}`);
+                log(`\n❌ 领取失败  QQ=${qqMask}  ${addMsg || JSON.stringify(api.add)}`);
             }
             // msg 存「本次状态的原因」：额度限制取额度相关的消息（可能来自 PreviewPrice 阶段），
             // 其余状态取 /api/add 的消息；成功/已领过不需要额外说明，留空。
@@ -387,7 +421,7 @@ async function main() {
             if (qqStatus === 'quota') {
                 resultMsg = addMsg.includes('名额不足') ? addMsg : previewMsg;
             } else if (qqStatus !== 'success' && qqStatus !== 'already') {
-                resultMsg = addMsg || '';
+                resultMsg = resultMsgPending || addMsg || '';
             }
             results.push({ qq, qqMask, code: qqCode, status: qqStatus, msg: resultMsg });
             // 关闭 page，释放资源
